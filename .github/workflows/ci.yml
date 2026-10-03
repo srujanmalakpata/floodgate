@@ -83,7 +83,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: docker/setup-buildx-action@v4
       - name: Build image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true
@@ -165,7 +165,7 @@ jobs:
       # Build once, scan that exact image, then push it: the published image is
       # the one Trivy checked (not a second, unscanned build).
       - name: Build release image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           load: true

@@ -1,0 +1,30 @@
+# Self-contained stack for a local cluster (kind / minikube / k3d):
+#   docker build -t floodgate:dev .  &&  kind load docker-image floodgate:dev
+#   kubectl apply -k deploy/k8s/overlays/local
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: rlgw
+resources:
+  - namespace.yaml
+  - ../../base
+  - redis.yaml
+  - upstream.yaml
+# Replace the base config: the local overlay has no load balancer in front, so
+# it must not trust X-Forwarded-For (trusted_proxy_hops: 0).
+configMapGenerator:
+  - name: floodgate-config
+    behavior: replace
+    files:
+      - config.yaml
+generatorOptions:
+  disableNameSuffixHash: true
+images:
+  - name: ghcr.io/srujanmalakpata/floodgate
+    newName: floodgate
+    newTag: dev
+patches:
+  - target: {kind: Deployment, name: floodgate}
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/imagePullPolicy
+        value: IfNotPresent

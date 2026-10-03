@@ -1,0 +1,23 @@
+# Application traffic only; service.type may be changed to LoadBalancer.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "rlgw.fullname" . }}
+  labels: {{- include "rlgw.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  selector: {{- include "rlgw.selectorLabels" . | nindent 4 }}
+  ports:
+    - {name: http, port: {{ .Values.service.port }}, targetPort: http}
+---
+# Admin endpoints (/healthz, /readyz, /metrics) stay cluster-internal.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "rlgw.fullname" . }}-admin
+  labels: {{- include "rlgw.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector: {{- include "rlgw.selectorLabels" . | nindent 4 }}
+  ports:
+    - {name: admin, port: 9090, targetPort: admin}

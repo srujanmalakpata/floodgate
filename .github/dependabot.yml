@@ -1,0 +1,13 @@
+# Weekly update PRs for pinned dependencies. The Trivy image digest in
+# ci.yml (TRIVY_IMAGE) is not tracked by Dependabot; bump it by hand.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: {interval: weekly}
+  - package-ecosystem: gomod
+    directory: /
+    schedule: {interval: weekly}
+  - package-ecosystem: docker
+    directory: /
+    schedule: {interval: weekly}

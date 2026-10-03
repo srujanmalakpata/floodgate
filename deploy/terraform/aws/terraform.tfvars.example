@@ -1,0 +1,12 @@
+# Copy to terraform.tfvars and edit. NOTE: this project has only been
+# validated (terraform validate), never applied. Applying creates billable
+# resources (NAT gateway, ALB, ElastiCache, Fargate tasks).
+name         = "rlgw"
+aws_region   = "ca-central-1"
+image        = "ghcr.io/srujanmalakpata/floodgate:0.1.0"
+upstream_url = "http://internal-api.example.internal:8080"
+
+routes = [
+  { name = "login", path_prefix = "/login", algorithm = "sliding_window", limit = 5, window = "1m", key_by = "ip", methods = ["POST"] },
+  { name = "api", path_prefix = "/api/", limit = 100, window = "1m", key_by = "api_key", ip_limit = 300 },
+]

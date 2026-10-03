@@ -1,0 +1,25 @@
+# Local-overlay config: like ../../base/config.yaml, but there is no ingress or load
+# balancer in front, so X-Forwarded-For is client-controlled and must not be trusted.
+listen: ":8080"
+admin_listen: ":9090"
+upstream: "http://upstream:9000"
+log_level: info
+backend:
+  type: redis
+  redis:
+    addr: "redis:6379"
+    key_prefix: rlgw
+    timeout: 50ms
+    password_env: REDIS_PASSWORD
+  failure_policy: local
+  breaker: {failure_threshold: 5, cooldown: 5s}
+key:
+  header: X-API-Key
+  trusted_proxy_hops: 0   # no ingress in the local overlay: use the TCP peer, never X-Forwarded-For
+routes:
+  - {name: login, path_prefix: /login, methods: [POST], algorithm: sliding_window, limit: 5, window: 1m, key_by: ip}
+  # key_by api_key: one budget per key; ip_limit caps one IP across rotating made-up keys
+  - {name: api, path_prefix: /api/, algorithm: token_bucket, limit: 100, window: 1m, key_by: api_key, ip_limit: 300}
+default: {algorithm: token_bucket, limit: 600, window: 1m}
+reload: {interval: 5s}
+shutdown: {drain_delay: 5s, timeout: 15s}

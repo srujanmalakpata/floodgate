@@ -1,0 +1,39 @@
+# The demo upstream shipped in the same image.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: upstream
+  labels: {app.kubernetes.io/name: upstream}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app.kubernetes.io/name: upstream}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: upstream}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: upstream
+          image: floodgate:dev
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/upstream"]
+          ports: [{name: http, containerPort: 9000}]
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 200m, memory: 64Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: upstream
+spec:
+  selector: {app.kubernetes.io/name: upstream}
+  ports: [{name: http, port: 9000, targetPort: http}]

@@ -1,0 +1,55 @@
+# Example gateway configuration. JSON with the same fields also works.
+# Routes, default and key are hot-reloaded (SIGHUP or file change);
+# everything else needs a restart.
+listen: ":8080"
+admin_listen: ":9090"            # /healthz, /readyz, /metrics (keep off the public LB)
+upstream: "http://localhost:9000"
+log_level: info
+
+backend:
+  type: memory                   # memory | redis
+  redis:
+    addr: "localhost:6379"
+    key_prefix: rlgw
+    timeout: 50ms                # per-call budget; on timeout the failure policy decides
+    password_env: ""             # name of an env var holding the password (never the password)
+    tls: false                   # true for ElastiCache / managed Redis with in-transit encryption
+  failure_policy: local          # open | closed | local (per-replica limits while Redis is down)
+  breaker:
+    failure_threshold: 5         # consecutive Redis failures before the breaker opens
+    cooldown: 5s                 # how long to skip Redis before one probe
+
+key:
+  header: X-API-Key              # read by routes with key_by: api_key (requests without it are limited per IP)
+  trusted_proxy_hops: 0          # set to 1 behind one load balancer that appends X-Forwarded-For
+
+routes:
+  - name: login
+    path_prefix: /login
+    methods: [POST]
+    algorithm: sliding_window    # exact: never more than 5 in any 60s
+    limit: 5
+    window: 1m
+    key_by: ip
+  - name: api
+    path_prefix: /api/
+    algorithm: token_bucket      # burst of 100, refills 100 per minute
+    limit: 100
+    window: 1m
+    # key_by defaults to ip. api_key gives each key its own budget, but the
+    # gateway does not check keys, so a client could invent a new key per
+    # request: ip_limit caps one IP across all its keys (same window/algorithm).
+    key_by: api_key
+    ip_limit: 300
+
+default:                         # everything else; omit to leave unmatched paths unlimited
+  algorithm: token_bucket        # key_by ip (the default)
+  limit: 600
+  window: 1m
+
+reload:
+  interval: 5s                   # file poll period; 0 = SIGHUP only
+
+shutdown:
+  drain_delay: 5s                # /readyz fails during this delay before connections close
+  timeout: 15s

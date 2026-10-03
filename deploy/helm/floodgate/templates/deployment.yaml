@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "rlgw.fullname" . }}
+  labels: {{- include "rlgw.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate: {maxUnavailable: 0, maxSurge: 1}
+  selector:
+    matchLabels: {{- include "rlgw.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "rlgw.selectorLabels" . | nindent 8 }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+    spec:
+      terminationGracePeriodSeconds: 30
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: gateway
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["-config", "/etc/rlgw/config.yaml"]
+          ports:
+            - {name: http, containerPort: 8080}
+            - {name: admin, containerPort: 9090}
+          {{- if .Values.redisPasswordSecret }}
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.redisPasswordSecret }}, key: password}
+          {{- end }}
+          readinessProbe:
+            httpGet: {path: /readyz, port: admin}
+            periodSeconds: 2
+          livenessProbe:
+            httpGet: {path: /healthz, port: admin}
+            initialDelaySeconds: 5
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          volumeMounts:
+            - {name: config, mountPath: /etc/rlgw, readOnly: true}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "rlgw.fullname" . }}

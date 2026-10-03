@@ -1,0 +1,40 @@
+# Two gateway replicas + Redis + a dummy upstream.
+#   docker compose up --build -d
+#   ./scripts/demo-shared-limits.sh      # alternates requests between :8081 and :8082
+name: floodgate
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 10
+
+  upstream:
+    build: .
+    image: floodgate:dev
+    entrypoint: ["/usr/local/bin/upstream"]
+    healthcheck:
+      disable: true
+
+  gateway-1: &gateway
+    image: floodgate:dev
+    depends_on:
+      redis: {condition: service_healthy}
+      upstream: {condition: service_started}
+    environment:
+      RLGW_CONFIG: /etc/rlgw/config.yaml
+    volumes:
+      - ./examples/compose-config.yaml:/etc/rlgw/config.yaml:ro
+    ports:
+      - "127.0.0.1:8081:8080"
+      - "127.0.0.1:9091:9090"
+
+  gateway-2:
+    <<: *gateway
+    ports:
+      - "127.0.0.1:8082:8080"
+      - "127.0.0.1:9092:9090"

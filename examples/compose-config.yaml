@@ -1,0 +1,40 @@
+# Config used by docker-compose.yml: two gateway replicas share limits through Redis.
+listen: ":8080"
+admin_listen: ":9090"
+upstream: "http://upstream:9000"
+log_level: info
+
+backend:
+  type: redis
+  redis:
+    addr: "redis:6379"
+    key_prefix: rlgw
+    timeout: 50ms
+  failure_policy: local
+  breaker:
+    failure_threshold: 3
+    cooldown: 5s
+
+key:
+  header: X-API-Key
+
+routes:
+  - name: api
+    path_prefix: /api/
+    algorithm: sliding_window
+    limit: 10
+    window: 30s
+    key_by: api_key
+    ip_limit: 30                 # backstop against clients that rotate made-up API keys
+
+default:
+  algorithm: token_bucket
+  limit: 100
+  window: 1m
+
+reload:
+  interval: 2s
+
+shutdown:
+  drain_delay: 2s
+  timeout: 10s

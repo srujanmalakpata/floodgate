@@ -1,0 +1,26 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+labels:
+  - pairs:
+      app.kubernetes.io/name: floodgate
+      app.kubernetes.io/part-of: floodgate
+    includeSelectors: true
+resources:
+  - deployment.yaml
+  - service.yaml
+  - pdb.yaml
+  - hpa.yaml
+configMapGenerator:
+  - name: floodgate-config
+    files:
+      - config.yaml
+# Keep a stable ConfigMap name: kubelet then updates the mounted file in place
+# and the gateway hot-reloads it (file polling) without restarting pods.
+# Trade-off: a bad edit is not rolled out gradually; the gateway keeps its last
+# valid config and counts rlgw_config_reloads_total{result="failure"}.
+generatorOptions:
+  disableNameSuffixHash: true
+images:
+  - name: floodgate
+    newName: ghcr.io/srujanmalakpata/floodgate
+    newTag: 0.1.0

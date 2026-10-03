@@ -1,0 +1,27 @@
+# Go build and test output
+/bin/
+/dist/
+/build/
+*.exe
+*.test
+*.out
+*.prof
+coverage*
+# Terraform working state (keep .terraform.lock.hcl)
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+terraform.tfvars
+crash.log
+# Helm packaging
+deploy/helm/*.tgz
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+# Local env / secrets
+.env
+.env.*
+!.env.example

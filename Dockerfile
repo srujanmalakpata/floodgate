@@ -1,8 +1,7 @@
 # syntax=docker/dockerfile:1
 
-# The module targets Go 1.24 (go.mod), but release binaries are built with a
-# currently supported toolchain so they pick up standard-library security fixes.
-ARG GO_VERSION=1.26
+# Keep the release toolchain aligned with the patched minimum in go.mod.
+ARG GO_VERSION=1.26.8
 
 # ---- build stage: full Go toolchain, discarded after the build ----
 FROM golang:${GO_VERSION}-alpine AS build

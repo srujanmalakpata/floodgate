@@ -1,6 +1,46 @@
 # floodgate
 
-A rate-limiting reverse proxy written in Go.
+A Go reverse proxy that enforces shared per-client rate limits across replicas and keeps serving through Redis outages with explicit failure policies.
+
+[![CI](https://github.com/srujanmalakpata/floodgate/actions/workflows/ci.yml/badge.svg)](https://github.com/srujanmalakpata/floodgate/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Go 1.26.8+](https://img.shields.io/badge/Go-1.26.8%2B-00ADD8?logo=go&logoColor=white)](go.mod)
+
+## Highlights
+
+- **One distributed budget:** atomic Redis Lua scripts share limits across replicas; the recorded Compose demo admitted **10 of 16 requests** across two gateways ([verification](VERIFICATION.md#summary), `TestTwoReplicasShareLimitsThroughRedis`).
+- **Backend parity:** token buckets and exact sliding-window logs run the same `TestConformance` suite against memory, miniredis and real Redis ([verification](VERIFICATION.md#summary)).
+- **Controlled outages:** timeout budgets, a circuit breaker and explicit open/closed/local policies are covered by `TestRedisOutageFailClosedAndOpen`, `TestRedisOutageFallsBackToLocalLimits` and `TestRedisCallHonoursContextDeadline` ([tests](internal/app/app_test.go)).
+- **Bypass resistance:** canonical paths, trusted proxy hops and an IP backstop for rotating API keys; **10/10 deliberate mutations** were caught by targeted tests ([verification](VERIFICATION.md#mutation-checks)).
+- **Operations without a shell:** distroless nonroot image, built-in HTTP probes, separate readiness/metrics endpoints and live config reload that preserves a valid configuration on error ([design](DESIGN.md#packaging-and-deployment), `TestReloader`).
+
+**Tech stack:** Go 1.26.8+, Redis / Lua, Prometheus, Docker Compose, Kubernetes / Helm, Terraform (AWS ECS Fargate), GitHub Actions.
+
+> Validation: earlier runs exercised the gateway, race tests, Docker image and Compose demo.
+> Kubernetes, Helm and Terraform have been validated, never deployed to a cluster or AWS.
+> The [2026-10-03 maintenance checks](VERIFICATION.md#maintenance-verification-2026-10-03) distinguish current passes from sandbox-blocked checks; historical measurements describe their original build.
+
+Contents: [Quickstart](#quickstart) · [Architecture](#architecture) · [Features](#features) · [Local development](#local-development) · [Tests](#tests) · [Results](#results) · [Limitations](#limitations)
+
+## Quickstart
+
+Requires Git, Docker with BuildKit and Compose v2+, and Bash/curl. Docker builds the Go binaries;
+no local Go installation is needed. Start Docker first and keep ports 8081/8082 and 9091/9092 free.
+
+```bash
+git clone https://github.com/srujanmalakpata/floodgate.git
+cd floodgate
+docker compose up --build --detach --wait --wait-timeout 180
+./scripts/demo-shared-limits.sh 16
+curl -fsS http://localhost:9091/metrics
+docker compose down --volumes
+```
+
+The demo alternates requests between two gateways with one API key: on a fresh stack,
+expect `allowed=10 limited=6`. Requests above the shared limit return `429` with `Retry-After`
+and `RateLimit-*` headers. The last command removes the stack.
+
+## Architecture
 
 It sits in front of an HTTP service and
 decides, per client and per route, whether each request may pass. Clients are identified
@@ -11,78 +51,6 @@ replicas enforce one shared limit. If Redis goes down, a circuit breaker and an 
 failure policy (fail-open, fail-closed, or per-replica local limits) decide what happens.
 The repo includes a distroless Docker image, a two-replica docker-compose demo,
 Kubernetes manifests and a Helm chart, Terraform for AWS ECS Fargate, and GitHub Actions CI.
-
-> Validation: the gateway, tests, Docker image and Compose demo have been run locally.
-> The Kubernetes manifests, Helm chart and Terraform are validated, never deployed
-> to a cluster or to AWS (see [VERIFICATION.md](VERIFICATION.md)).
-
-## Features
-
-- **Two algorithms behind one interface** (`limiter.Limiter`):
-  - *Token bucket*: allows bursts up to `limit` and refills `limit` tokens per `window`.
-  - *Sliding-window log*: never more than `limit` requests in any trailing `window`, with no burst at fixed-window boundaries.
-- **Two backends, one conformance suite**: the in-memory Go implementation and the Redis
-  Lua scripts pass the same table-driven tests against miniredis and a real Redis 7.4.
-- **Distributed limits**: every replica runs the same Lua script, and Redis executes it
-  atomically, so there is no read-then-write race between replicas.
-- **Degradation policy**: Redis calls have a timeout and sit behind a circuit breaker
-  (closed, then open, then half-open). While Redis is down the policy is `open` (allow all), `closed`
-  (reject with 503), or `local` (keep enforcing limits per replica in memory).
-- **Standard responses**: `429` with `Retry-After`, plus `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` and
-  `RateLimit-Policy` headers. When two limits apply to a request (per key and per IP), the headers on an allowed
-  response describe the tighter one, so `RateLimit-Remaining: 0` means the next request will be refused, and
-  `RateLimit-Policy` lists both.
-- **Client identity**: the client IP by default, with a `trusted_proxy_hops` setting so spoofed `X-Forwarded-For`
-  entries are ignored. Routes can opt into `key_by: api_key` (SHA-256 of the key, so raw keys never reach Redis, logs or
-  metrics). The gateway does not check that keys are real, so such routes take an `ip_limit` backstop that caps one IP
-  across all the keys it invents.
-- **Canonical paths and segment matching**: `//login`, `/./login` and `/x/..%2Flogin` are cleaned to `/login` before
-  route matching, and the upstream receives the cleaned path, so duplicate slashes and dot segments cannot dodge a
-  route's limit. Prefixes match whole path segments (`/login` covers `/login/x` but not `/login-help`; `/api/` also
-  covers `/api`), and a route that lists `GET` also covers `HEAD`. Matching is case-sensitive (see Limitations).
-- **Hot reload** of routes and limits on `SIGHUP` or a file change (polling also works with
-  Kubernetes ConfigMap symlink swaps). An invalid file never replaces a working config.
-- **Operations**: `/healthz`, `/readyz` and Prometheus `/metrics` on a separate admin port; JSON logs via `log/slog`
-  (rejections are logged at Debug, so a flood of 429s does not flood the log);
-  graceful shutdown (readiness fails, the gateway drains, then in-flight requests finish); `-check` validates a config,
-  `-probe` runs a health check without curl, and `-version` prints the version stamped in at build time.
-- **Packaging and IaC**: a multi-stage Dockerfile that produces a `distroless/static:nonroot` image (9.63 MB compressed), docker-compose,
-  kustomize manifests (Deployment, Service, ConfigMap, PDB, HPA), a Helm chart, Terraform for AWS
-  (ECS Fargate, ALB, ElastiCache Redis with TLS and AUTH, CloudWatch Logs, autoscaling), and a GitHub Actions CI
-  workflow (validated with actionlint; it has not run on GitHub yet). On a version tag, CI builds the image once,
-  scans that image with Trivy and pushes the same image to GHCR.
-
-## Quick start
-
-Requires Go 1.24+. Docker is optional.
-
-```bash
-# Run locally with the in-memory backend. Build first: `go run` does not forward
-# SIGHUP to the program it starts, so the reload below would not reach the gateway.
-go build -o bin/ ./cmd/...
-./bin/upstream &                                          # demo upstream on :9000
-./bin/gateway -config examples/config.yaml &              # proxy :8080, admin :9090
-GW=$!
-
-for i in $(seq 7); do curl -s -o /dev/null -w '%{http_code} ' -X POST localhost:8080/login; done
-# -> 200 200 200 200 200 429 429   (login: 5 per minute per IP, sliding window)
-curl -i -X POST localhost:8080/login        # shows Retry-After and RateLimit-* headers
-curl localhost:9090/metrics | grep rlgw_
-kill -HUP "$GW"                             # reload routes/limits now (the file is also polled every 5 s)
-kill "$GW" %1                               # SIGTERM: drain, then stop
-
-# Two replicas sharing one Redis
-docker build -t floodgate:dev .
-docker compose up -d --wait
-./scripts/demo-shared-limits.sh             # alternates :8081/:8082 -> allowed=10 limited=6
-docker compose stop redis                   # breaker opens; limits fall back to per-replica memory
-docker compose down
-```
-
-Configuration reference: [examples/config.yaml](examples/config.yaml) (every field is commented).
-Validate a file with `gateway -check -config FILE`.
-
-## Architecture
 
 ```mermaid
 flowchart LR
@@ -122,6 +90,73 @@ deploy/terraform/aws  ECS Fargate + ALB + ElastiCache + CloudWatch (validated, n
 
 Design decisions and trade-offs: [DESIGN.md](DESIGN.md).
 
+## Features
+
+- **Two algorithms behind one interface** (`limiter.Limiter`):
+  - *Token bucket*: allows bursts up to `limit` and refills `limit` tokens per `window`.
+  - *Sliding-window log*: never more than `limit` requests in any trailing `window`, with no burst at fixed-window boundaries.
+- **Two backends, one conformance suite**: the in-memory Go implementation and the Redis
+  Lua scripts pass the same table-driven tests against miniredis and a real Redis 7.4.
+- **Distributed limits**: every replica runs the same Lua script, and Redis executes it
+  atomically, so there is no read-then-write race between replicas.
+- **Degradation policy**: Redis calls have a timeout and sit behind a circuit breaker
+  (closed, then open, then half-open). While Redis is down the policy is `open` (allow all), `closed`
+  (reject with 503), or `local` (keep enforcing limits per replica in memory).
+- **Standard responses**: `429` with `Retry-After`, plus `RateLimit-Limit`, `RateLimit-Remaining`, `RateLimit-Reset` and
+  `RateLimit-Policy` headers. When two limits apply to a request (per key and per IP), the headers on an allowed
+  response describe the tighter one, so `RateLimit-Remaining: 0` means the next request will be refused, and
+  `RateLimit-Policy` lists both.
+- **Client identity**: the client IP by default, with a `trusted_proxy_hops` setting so spoofed `X-Forwarded-For`
+  entries are ignored. Routes can opt into `key_by: api_key` (SHA-256 of the key, so raw keys never reach Redis, logs or
+  metrics). The gateway does not check that keys are real, so such routes take an `ip_limit` backstop that caps one IP
+  across all the keys it invents.
+- **Canonical paths and segment matching**: `//login`, `/./login` and `/x/..%2Flogin` are cleaned to `/login` before
+  route matching, and the upstream receives the cleaned path, so duplicate slashes and dot segments cannot dodge a
+  route's limit. Prefixes match whole path segments (`/login` covers `/login/x` but not `/login-help`; `/api/` also
+  covers `/api`), and a route that lists `GET` also covers `HEAD`. Matching is case-sensitive (see Limitations).
+- **Hot reload** of routes and limits on `SIGHUP` or a file change (polling also works with
+  Kubernetes ConfigMap symlink swaps). An invalid file never replaces a working config.
+- **Operations**: `/healthz`, `/readyz` and Prometheus `/metrics` on a separate admin port; JSON logs via `log/slog`
+  (rejections are logged at Debug, so a flood of 429s does not flood the log);
+  graceful shutdown (readiness fails, the gateway drains, then in-flight requests finish); `-check` validates a config,
+  `-probe` runs a health check without curl, and `-version` prints the version stamped in at build time.
+- **Packaging and IaC**: a multi-stage Dockerfile that produces a `distroless/static:nonroot` image (9.63 MB compressed in the recorded Linux build), docker-compose,
+  kustomize manifests (Deployment, Service, ConfigMap, PDB, HPA), a Helm chart, Terraform for AWS
+  (ECS Fargate, ALB, ElastiCache Redis with TLS and AUTH, CloudWatch Logs, autoscaling), and a GitHub Actions CI
+  workflow. On a version tag, CI builds the image once,
+  scans that image with Trivy and pushes the same image to GHCR.
+
+## Local development
+
+Requires Go 1.26.8+ and Bash/curl. Run these commands from the repository root in Bash.
+Build first so signals reach the gateway process directly. (If a port is already in use, the
+readiness loops keep waiting; press Ctrl-C and free ports 8080, 9000 and 9090.)
+
+```bash
+go build -o bin/ ./cmd/...
+./bin/upstream &
+UP=$!
+until ./bin/gateway -probe http://localhost:9000/; do sleep 0.2; done
+./bin/gateway -config examples/config.yaml &
+GW=$!
+trap 'kill "$GW" "$UP" 2>/dev/null; wait "$GW" "$UP" 2>/dev/null' EXIT
+# Wait for observable readiness before sending requests.
+until ./bin/gateway -probe http://localhost:9090/readyz; do sleep 0.2; done
+for i in $(seq 7); do curl -s -o /dev/null -w '%{http_code} ' -X POST localhost:8080/login; done
+# -> 200 200 200 200 200 429 429 (5 per minute per IP, sliding window)
+curl -i -X POST localhost:8080/login
+kill -HUP "$GW"                     # reload now; files are also polled every 5 s
+kill "$GW" "$UP"
+wait "$GW" "$UP"
+trap - EXIT
+```
+
+Configuration reference: [examples/config.yaml](examples/config.yaml) (every field is commented).
+Validate a file with `./bin/gateway -check -config FILE`.
+
+With the Compose stack running, `docker compose stop redis` exercises per-replica local limits;
+`docker compose kill -s HUP gateway-1` requests a reload. Cleanup: `docker compose down --volumes`.
+
 ## Tests
 
 ```bash
@@ -134,7 +169,8 @@ make infra-check                                       # terraform validate, kub
 
 - Table-driven unit tests drive the bucket math, config validation, route matching, path cleaning, IP/key extraction,
   rate-limit headers when two limits apply, breaker transitions (including stale outcomes) and failure policies with a
-  **fake clock**, so the tests have no sleeps and give the same result every run. A breaker stress test runs 8
+  **fake clock**, so algorithm and policy assertions do not depend on wall-clock timing.
+  Listener and reload tests wait on observable state; shutdown waits for the upstream request and listener closure. A breaker stress test runs 8
   goroutines against one breaker under `-race` and checks that only one half-open probe is ever in flight.
 - The **conformance suite** (`internal/limiter/limitertest`) runs the same scenarios against
   the memory store, Redis via miniredis, and (in CI or with `RLGW_TEST_REDIS`) a real Redis. It also checks that 320 concurrent
@@ -201,8 +237,9 @@ Across measurements on this host, `Log.Take` varies from 182 to 124 ns and the n
   rejects sliding-window limits above 10,000. Larger limits would call for a sliding-window *counter* approximation.
 - The `local` failure policy enforces the limit per replica, so N replicas may admit up to N times the limit during an outage.
 - A Redis Cluster deployment works key by key (each script touches one key), but it was only tested against single-node Redis.
-- The module targets Go 1.24, which no longer gets security fixes. govulncheck reports standard-library advisories when
-  the code is built with 1.24.7. The Docker image is built with Go 1.26, and govulncheck finds nothing reachable there.
+- The minimum build toolchain and Docker image use Go 1.26.8; CI scans both that release and current stable Go.
+  Older Go 1.24.7 builds had standard-library advisories. See the dated verification records for scan results
+  and checks blocked in the current environment.
 
 ## License
 

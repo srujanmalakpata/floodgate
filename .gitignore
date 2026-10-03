@@ -7,6 +7,9 @@
 *.out
 *.prof
 coverage*
+# CI smoke-test output
+/demo.txt
+/version.txt
 # Terraform working state (keep .terraform.lock.hcl)
 .terraform/
 *.tfstate

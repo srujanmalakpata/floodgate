@@ -129,22 +129,19 @@ Design decisions and trade-offs: [DESIGN.md](DESIGN.md).
 ## Local development
 
 Requires Go 1.26.8+ and Bash/curl. Run these commands from the repository root in Bash.
-Build first so signals reach the gateway process directly.
+Build first so signals reach the gateway process directly. (If a port is already in use, the
+readiness loops keep waiting; press Ctrl-C and free ports 8080, 9000 and 9090.)
 
 ```bash
 go build -o bin/ ./cmd/...
 ./bin/upstream &
 UP=$!
-until ./bin/gateway -probe http://localhost:9000/; do
-  kill -0 "$UP" || exit 1
-done
+until ./bin/gateway -probe http://localhost:9000/; do sleep 0.2; done
 ./bin/gateway -config examples/config.yaml &
 GW=$!
 trap 'kill "$GW" "$UP" 2>/dev/null; wait "$GW" "$UP" 2>/dev/null' EXIT
 # Wait for observable readiness before sending requests.
-until ./bin/gateway -probe http://localhost:9090/readyz; do
-  kill -0 "$GW" || exit 1
-done
+until ./bin/gateway -probe http://localhost:9090/readyz; do sleep 0.2; done
 for i in $(seq 7); do curl -s -o /dev/null -w '%{http_code} ' -X POST localhost:8080/login; done
 # -> 200 200 200 200 200 429 429 (5 per minute per IP, sliding window)
 curl -i -X POST localhost:8080/login

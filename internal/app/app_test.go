@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -25,12 +26,25 @@ import (
 )
 
 type running struct {
-	app      *App
-	proxyURL string
-	adminURL string
-	cfgPath  string
-	stop     context.CancelFunc
-	done     chan error
+	app         *App
+	proxyURL    string
+	adminURL    string
+	cfgPath     string
+	stop        context.CancelFunc
+	done        chan error
+	proxyClosed chan struct{}
+}
+
+type observedListener struct {
+	net.Listener
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (ln *observedListener) Close() error {
+	err := ln.Listener.Close()
+	ln.once.Do(func() { close(ln.closed) })
+	return err
 }
 
 func startGateway(t *testing.T, cfgYAML string) *running {
@@ -43,13 +57,15 @@ func startGateway(t *testing.T, cfgYAML string) *running {
 	if err != nil {
 		t.Fatal(err)
 	}
-	proxyLn := listen(t)
+	proxyClosed := make(chan struct{})
+	proxyLn := &observedListener{Listener: listen(t), closed: proxyClosed}
 	adminLn := listen(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &running{
 		app: a, cfgPath: path, stop: cancel, done: make(chan error, 1),
-		proxyURL: "http://" + proxyLn.Addr().String(),
-		adminURL: "http://" + adminLn.Addr().String(),
+		proxyURL:    "http://" + proxyLn.Addr().String(),
+		adminURL:    "http://" + adminLn.Addr().String(),
+		proxyClosed: proxyClosed,
 	}
 	go func() { r.done <- a.Serve(ctx, proxyLn, adminLn) }()
 	t.Cleanup(func() {
@@ -87,11 +103,10 @@ func get(t *testing.T, url, apiKey string) (*http.Response, string) {
 	return res, string(body)
 }
 
-func upstream(t *testing.T, delay time.Duration) (*httptest.Server, *atomic.Int64) {
+func upstream(t *testing.T) (*httptest.Server, *atomic.Int64) {
 	var hits atomic.Int64
 	s := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		hits.Add(1)
-		time.Sleep(delay)
 		_, _ = io.WriteString(w, "upstream ok")
 	}))
 	t.Cleanup(s.Close)
@@ -112,7 +127,7 @@ routes:
 }
 
 func TestTwoReplicasShareLimitsThroughRedis(t *testing.T) {
-	up, hits := upstream(t, 0)
+	up, hits := upstream(t)
 	mr := miniredis.RunT(t)
 	cfg := redisConfig(up.URL, mr.Addr(), "")
 	gateways := []*running{startGateway(t, cfg), startGateway(t, cfg)}
@@ -154,7 +169,7 @@ func TestTwoReplicasShareLimitsThroughRedis(t *testing.T) {
 }
 
 func TestRedisOutageFallsBackToLocalLimits(t *testing.T) {
-	up, _ := upstream(t, 0)
+	up, _ := upstream(t)
 	mr := miniredis.RunT(t)
 	g := startGateway(t, redisConfig(up.URL, mr.Addr(), ""))
 
@@ -186,7 +201,7 @@ func TestRedisOutageFallsBackToLocalLimits(t *testing.T) {
 }
 
 func TestHotReloadChangesAndRemovesLimits(t *testing.T) {
-	up, _ := upstream(t, 0)
+	up, _ := upstream(t)
 	routeCfg := func(limit int) string {
 		return fmt.Sprintf("upstream: %s\nroutes:\n  - {name: api, path_prefix: /api/, limit: %d, window: 1h}\n", up.URL, limit)
 	}
@@ -242,7 +257,7 @@ func TestRedisOutageFailClosedAndOpen(t *testing.T) {
 		status int
 	}{{"closed", http.StatusServiceUnavailable}, {"open", http.StatusOK}} {
 		t.Run(tc.policy, func(t *testing.T) {
-			up, hits := upstream(t, 0)
+			up, hits := upstream(t)
 			mr := miniredis.RunT(t)
 			cfg := strings.Replace(redisConfig(up.URL, mr.Addr(), ""), "failure_policy: local", "failure_policy: "+tc.policy, 1)
 			g := startGateway(t, cfg)
@@ -283,8 +298,18 @@ func TestRedisOutageFailClosedAndOpen(t *testing.T) {
 }
 
 func TestGracefulShutdownDrainsInFlightRequests(t *testing.T) {
-	up, _ := upstream(t, 300*time.Millisecond)
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(entered)
+		<-release
+		_, _ = io.WriteString(w, "upstream ok")
+	}))
+	t.Cleanup(up.Close)
 	g := startGateway(t, fmt.Sprintf("upstream: %s\nshutdown: {drain_delay: 200ms, timeout: 5s}\n", up.URL))
+	t.Cleanup(unblock)
 
 	if res, body := get(t, g.adminURL+"/readyz", ""); res.StatusCode != 200 || !strings.HasPrefix(body, "ready") {
 		t.Fatalf("readyz before shutdown = %d %q", res.StatusCode, body)
@@ -301,7 +326,11 @@ func TestGracefulShutdownDrainsInFlightRequests(t *testing.T) {
 		_ = res.Body.Close()
 		inflight <- res.StatusCode
 	}()
-	time.Sleep(50 * time.Millisecond) // let the request reach the upstream
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("request did not reach the upstream")
+	}
 	g.stop()
 
 	// During the drain delay readiness fails but the listener still works.
@@ -317,8 +346,21 @@ func TestGracefulShutdownDrainsInFlightRequests(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	if code := <-inflight; code != 200 {
-		t.Fatalf("in-flight request finished with %d, want 200", code)
+	// Keep the upstream request blocked until Shutdown closes the listener.
+	// This proves that shutdown waits for an active request, regardless of scheduling.
+	select {
+	case <-g.proxyClosed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("proxy listener did not close during shutdown")
+	}
+	unblock()
+	select {
+	case code := <-inflight:
+		if code != 200 {
+			t.Fatalf("in-flight request finished with %d, want 200", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("in-flight request did not finish")
 	}
 	select {
 	case err := <-g.done:
@@ -335,7 +377,7 @@ func TestGracefulShutdownDrainsInFlightRequests(t *testing.T) {
 }
 
 func TestHealthzAndBadConfig(t *testing.T) {
-	up, _ := upstream(t, 0)
+	up, _ := upstream(t)
 	g := startGateway(t, "upstream: "+up.URL+"\n")
 	if res, body := get(t, g.adminURL+"/healthz", ""); res.StatusCode != 200 || body != "ok\n" {
 		t.Fatalf("healthz = %d %q", res.StatusCode, body)

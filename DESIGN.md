@@ -220,12 +220,12 @@ mutexes would mean more allocations and still need a map lock.
 ### Packaging and deployment
 
 - **Image**: multi-stage build into `distroless/static-debian12:nonroot`. The image has no shell or package
-  manager and runs as uid 65532. It is 9.6 MB compressed (39 MB unpacked; the stripped gateway binary is 18 MB when built with Go 1.26), and Trivy finds
-  no HIGH/CRITICAL issues. Because the image has no curl,
+  manager and runs as uid 65532. The recorded Linux build was 9.6 MB compressed (39 MB unpacked; the stripped gateway binary was 18 MB with Go 1.26.8), with
+  no HIGH/CRITICAL Trivy findings ([verification](VERIFICATION.md#summary)); sizes and scan results depend on the build. Because the image has no curl,
   the binary has a `-probe` mode for Docker and ECS health checks.
-- **Toolchain**: `go.mod` declares Go 1.24 (the minimum supported language version), while
-  the Dockerfile builds release binaries with Go 1.26. Go 1.24 no longer receives security
-  fixes, and govulncheck flags standard-library advisories with 1.24.7. CI tests on both.
+- **Toolchain**: `go.mod` and the Dockerfile require Go 1.26.8, a patched release that
+  replaces the unsupported Go 1.24 minimum. CI tests and runs the pinned govulncheck
+  on both Go 1.26.8 and current stable Go. Scan outcomes are dated in [VERIFICATION.md](VERIFICATION.md).
 - **Kubernetes**: 2+ replicas set by the HPA's `minReplicas` (the Deployment has no `spec.replicas`, which would make
   every `kubectl apply -k` reset the count and fight the autoscaler), a `maxUnavailable: 0` rolling update, a PDB with `minAvailable: 1`, a CPU HPA,
   topology spread, a read-only root filesystem with all capabilities dropped, and `terminationGracePeriodSeconds` (30s)
@@ -237,10 +237,10 @@ mutexes would mean more allocations and still need a map lock.
   Logs go to a CloudWatch log group, and target tracking scales on CPU. ECS has no ConfigMap, so an init container writes the
   rendered config into a task volume. Intentional scanner exceptions (public ALB, HTTP listener when no certificate is set,
   HTTPS egress) are annotated inline with a reason. **It has never been applied.**
-- **CI and release**: lint (`go vet`, golangci-lint), tests with `-race` on Go 1.24 and the current stable Go (with a
+- **CI and release**: lint (`go vet`, golangci-lint), tests with `-race` on Go 1.26.8 and the current stable Go (with a
   real Redis service container), govulncheck pinned to a version, image build, Trivy, a compose smoke test, Terraform
   and Kubernetes validation. The vulnerability scans also run weekly on a schedule, so a newly published advisory turns
-  a scheduled run red rather than an unrelated pull request. On a version tag the release job builds the image once,
+  up between code changes. On a version tag the release job builds the image once,
   scans it with Trivy, checks that `gateway -version` prints the tag (passed in with `-ldflags -X main.version`), and
   pushes that same image to GHCR.
 

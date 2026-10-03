@@ -11,6 +11,70 @@
   or `deploy/terraform/aws/.terraform/`, and an image build with `--no-cache`.
 - **Deployment status:** infrastructure is validated, never deployed to AWS or a Kubernetes cluster. No credentials are used.
 
+## Maintenance verification (2026-10-03)
+
+Environment: macOS arm64, Go 1.27.1, Docker CLI 29.8.1, Compose 5.6.0,
+Buildx 0.37.2, cached actionlint 1.7.7. No deployment or GitHub workflow was triggered.
+Go module/build caches and generated binaries were isolated under `/private/tmp/floodgate-rt-cache`.
+The sandbox denies Docker socket access, TCP listeners and module-proxy DNS resolution.
+**The complete updated build is not verified green in this environment.**
+
+Changes under verification: upstream now has an HTTP healthcheck using the existing gateway
+`-probe` mode, and both replicas wait for upstream health. The five requested action major
+updates and both requested module updates are applied. The minimum Go directive, Docker build
+and minimum CI test version now use 1.26.8, replacing the unsupported 1.24 minimum.
+CI runs govulncheck on both the minimum and stable toolchains. golangci-lint is updated to
+2.14.0 for modern Go support; the action remains responsible for installing/running it.
+The shutdown test now waits for upstream entry and proxy listener closure instead of guessing
+request arrival with a 50 ms sleep. Assertions and test selection in CI remain intact.
+
+| Command / check | Result | Evidence / limitation |
+|---|---|---|
+| `go vet ./...` | BLOCKED | Exit 1: uncached updated modules cannot be downloaded; `lookup proxy.golang.org: no such host`. |
+| `go test -race -count=1 ./...` | BLOCKED | Exit 1: updated Prometheus, YAML and x/sys sources unavailable. The four dependency-independent test packages pass; this is not a full-suite pass. |
+| `go mod tidy -diff` | BLOCKED | Exit 1 for the same module-proxy DNS restriction; combined updates have not been verified tidy. |
+| `docker compose up --build --detach --wait --wait-timeout 180 && docker compose down --volumes` | BLOCKED | Exit 1: `permission denied` connecting to the Colima Docker socket. No containers started; the conditional teardown was not reached. |
+| `docker compose config -q` | PASS | Exit 0, Compose configuration parses. |
+| Assertions on `docker compose config --format json` | PASS | Upstream uses `CMD /usr/local/bin/gateway -probe http://127.0.0.1:9000/`; both gateway dependencies resolve to `service_healthy`. Static validation only. |
+| `actionlint .github/workflows/ci.yml` (cached v1.7.7 executable) | PASS | Exit 0, no diagnostics after the action and Go-version changes. |
+| New action metadata review | PASS | Read the tagged `action.yml` files for checkout v7, setup-go v7, lint-action v9, setup-buildx v4 and setup-terraform v4. Existing inputs are supported; the actions use Node 24 on hosted runners. This does not execute the actions. |
+| `go test -race -count=1 ./internal/breaker ./internal/degrade ./internal/limiter ./internal/limiter/memory` | PASS | All four packages pass with the final go.mod, Go 1.27.1 and race detection. |
+| `go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...` | BLOCKED | Exit 1 fetching scanner metadata from the module proxy; no current vulnerability result. Historical Go 1.26.8 success below is not a scan of the updated dependencies. |
+| `go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0 run ./...` | BLOCKED | Exit 1: tool download needs module-proxy DNS. |
+| `go test -run '^$' -bench . -benchtime 200x ./...` | BLOCKED | Core and memory benchmarks execute, but the full command exits 1 for uncached updated dependencies. Smoke samples are not substituted for the historical measurements. |
+| `gofmt -l .` | PASS | No files listed. |
+| `bash -n scripts/demo-shared-limits.sh` | PASS | Exit 0. |
+| README command count / local links / documentation content review | PASS | Six Quickstart commands; local link targets exist; content constraints satisfied. |
+| `git diff --check` | PASS | No whitespace errors. |
+| Tracked-output and ignore review (`git ls-files`, `git check-ignore`) | PASS | No tracked build/test/state output found; bin, build, coverage and CI demo/version outputs are ignored. Added `.editorconfig`; LICENSE unchanged. |
+| Terraform fmt/init/validate; Kubernetes rendering/kubeconform; Helm lint/render | NOT_RUN | Terraform, kubectl, kubeconform and Helm executables are absent; historical validation retained below. |
+| Trivy image / IaC scans and real-Redis conformance | BLOCKED | Docker daemon access is denied; no new image, scanner container or Redis service could run. |
+| Compose demo / native HTTP Quickstart | BLOCKED | Docker startup is denied; native HTTP listeners also fail with `bind: operation not permitted`. Commands and configuration were reviewed, but the current runtime was not exercised. |
+| GitHub Actions and tag release / cloud or cluster deployment | NOT_RUN | No push, release or deployment performed. |
+
+### Cached-dependency diagnostics
+
+To check the current source independently of uncached dependency downloads, the original
+`go.mod` and `go.sum` were copied to temporary `cached.mod` / `cached.sum` files, with
+`GOFLAGS='-modfile=/private/tmp/floodgate-rt-cache/cached.mod -mod=readonly'` and `GOPROXY=off`.
+The repository's updated dependency files were not reverted or altered for these checks.
+These results **do not validate the dependency upgrades**:
+
+| Command with the temporary original dependency graph | Result | Evidence |
+|---|---|---|
+| `go vet ./...` | PASS | Exit 0; includes compilation/analysis of the changed shutdown test. |
+| `go test -race -count=1 ./...` | BLOCKED | Exit 1: app/gateway httptest servers and miniredis cannot bind TCP sockets (`operation not permitted`). Config, breaker, degradation, limiter and memory tests pass. No tests were skipped or weakened to bypass the restriction. |
+| `go build -o /private/tmp/floodgate-rt-cache/bin/ ./cmd/...` | PASS | Both binaries build; `gateway -version` prints `gateway dev`. |
+| `gateway -check -config examples/config.yaml` and `examples/compose-config.yaml` | PASS | Both report `config ok` using the diagnostic binary. |
+
+Module versions, required indirect updates and checksums were copied from the existing
+[Prometheus update](https://github.com/srujanmalakpata/floodgate/pull/5) and
+[YAML update](https://github.com/srujanmalakpata/floodgate/pull/3) patches via read-only access;
+upstream module metadata was also inspected. No new direct runtime dependency was added.
+Rerun all four acceptance commands, the complete CI checks and the new shutdown test where
+network, local sockets and Docker are available before treating this change as fully verified.
+The following Linux results remain historical evidence for their original dependency graph.
+
 ## Summary
 
 | # | Command | Result | Key output |
